@@ -59,6 +59,7 @@ def stop_instance(region, instanceid):
     instance_waiter.wait(InstanceIds=[instanceid])
 
 def create_ami(region, instanceid, instance_name, no_reboot=True):
+    print "Creating AMI from on-demand instance"
     try:
         ami = aws_client(region, resource=False).create_image(Name="spotify {}".format(instance_name), InstanceId=instanceid, NoReboot=no_reboot)
     except ClientError as e:
@@ -210,13 +211,9 @@ CLICK_CONTEXT_SETTINGS = dict(
               '--dry-run',
               is_flag=True,
               help="get an estimate on saving for instance type")
-@click.option('-v',
-              '--verbose',
-              is_flag=True,
-              help="display run log in verbose mode")
 @click.argument('InstanceId')
 def spotify(instanceid, dry_run, reserve, keep_up, verbose):
-    """Get a Linux distro instance on AWS with one click
+    """Convert EC2 on-demand instance to spot instance with one command
     """
     if not keep_up:
         print "Stopping instance"
