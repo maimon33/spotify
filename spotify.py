@@ -13,6 +13,9 @@ from pkg_resources import resource_filename
 
 DEFAULT_REGION="eu-west-1"
 
+def _format_json(dictionary):
+    return json.dumps(dictionary, indent=4, sort_keys=True)
+
 def instance_dict(instanceid):
     my_instance_dict = {}
     security_groups = []
@@ -43,6 +46,8 @@ def aws_client(region, resource=True, aws_service="ec2"):
     except NoRegionError as e:
         logger.warning("Error reading 'Default Region'. Make sure boto is configured")
         sys.exit()
+    except ClientError as e:
+        print e
 
 def get_role_name(region, role_arn):
     roles = aws_client(region, resource=False, aws_service="iam").list_roles()["Roles"]
@@ -68,9 +73,9 @@ def create_ami(region, instanceid, instance_name, no_reboot=True):
     
     spotify_image = aws_client(region, resource=False).describe_images(Filters=[{
         'Name': 'name',
-        'Values': ['spotify-ami',]},
+        'Values': ['spotify*',]},
         ])
-    
+      
     spotify_image_id = spotify_image["Images"][0]["ImageId"]
     ami_waiter = aws_client(region, resource=False).get_waiter('image_available')
     
@@ -151,26 +156,27 @@ def transfer_eip(region, instanceid, spot_instance):
     except ClientError as e:
         print e
     
-def create_spot_instance(region, instanceid, reserve, instance_name, keep_up, type, keypair, groups, transfer_ip, role, subnet):
+def create_spot_instance(region, instanceid, reserve, vpc, instance_name, keep_up, type, keypair, groups, transfer_ip, role, subnet):
+    LaunchSpecifications = {}
+    
     if role:
         LaunchSpecifications["LaunchSpecifications"] = {"Arn": role["Arn"],
-                                                        "Name": get_role_name(role["Arn"])}
+                                                        "Name": get_role_name(region, role["Arn"])}
     if reserve:
-        LaunchSpecifications = {
-            "SecurityGroupIds": groups,
-            "SubnetId": subnet
-            }
+        LaunchSpecifications["SecurityGroupIds"] = [unicode(groups[0])]
+        LaunchSpecifications["SubnetId"] = subnet
 
+    print LaunchSpecifications
+    
     client = aws_client(region, resource=False)
     
     spot_offer_price = get_spot_price(region, type)
 
-    LaunchSpecifications = {
-        "ImageId": create_ami(region, instanceid, instance_name, no_reboot=keep_up),
-        "InstanceType": type,
-        "KeyName": keypair,
-        "Placement": {"AvailabilityZone": ""}
-        }
+    LaunchSpecifications["ImageId"] = create_ami(region, instanceid, instance_name, no_reboot=keep_up)
+    LaunchSpecifications["InstanceType"] = type
+    LaunchSpecifications["KeyName"] = keypair
+    LaunchSpecifications["Placement"] = {"AvailabilityZone": ""}
+
     spot_instance = client.request_spot_instances(
         SpotPrice=spot_offer_price,
         Type="persistent",
@@ -188,7 +194,7 @@ def create_spot_instance(region, instanceid, reserve, instance_name, keep_up, ty
     instance.create_tags(Tags=[{'Key': 'Name', 'Value': 'spot - {}'.format(instance_name)}])
     
     if transfer_ip:
-        transfer_eip(instanceid, instance.instance_id)
+        transfer_eip(region, instanceid, instance.instance_id)
     
     return instance.public_dns_name
 
@@ -212,12 +218,12 @@ CLICK_CONTEXT_SETTINGS = dict(
               is_flag=True,
               help="get an estimate on saving for instance type")
 @click.argument('InstanceId')
-def spotify(instanceid, dry_run, reserve, keep_up, verbose):
+def spotify(instanceid, dry_run, reserve, keep_up):
     """Convert EC2 on-demand instance to spot instance with one command
     """
-    if not keep_up:
+    if not keep_up and not dry_run:
         print "Stopping instance"
-        stop_instance(instanceid)
+        stop_instance(DEFAULT_REGION, instanceid)
     
     instance = get_instance(DEFAULT_REGION, instanceid)
     my_instance = instance_dict(instance)
@@ -233,6 +239,7 @@ Spot        price: {}""".format(my_instance["type"], instance_cost, spot_instanc
     spot_instance = create_spot_instance(DEFAULT_REGION,
                                          instanceid=instanceid, 
                                          reserve=reserve,
+                                         vpc=my_instance["vpc"],
                                          instance_name=my_instance["name"],
                                          keep_up=keep_up,
                                          type=my_instance["type"], 
