@@ -43,20 +43,25 @@ def aws_client(region, resource=True, aws_service="ec2"):
             return boto3.resource(aws_service, region_name=region)
         else:
             return boto3.client(aws_service, region_name=region)
-    except NoRegionError as e:
-        logger.warning("Error reading 'Default Region'. Make sure boto is configured")
-        sys.exit()
-    except ClientError as e:
-        print e
+    except:
+        print "client failed"
+    # except NoRegionError as e:
+    #     logger.warning("Error reading 'Region'. Make sure boto is configured")
+    #     sys.exit()
+    # except ClientError as e:
+    #     print e
 
 def get_role_name(region, role_arn):
     roles = aws_client(region, resource=False, aws_service="iam").list_roles()["Roles"]
     for role in roles:
-        if role["Arn"] == role_arn:
+        if role["RoleId"] == role_arn:
             return role["RoleName"]
 
 def get_instance(region, instanceid):
-    return aws_client(region, resource=False).describe_instances(InstanceIds=[instanceid])
+    try:
+        return aws_client(region, resource=False).describe_instances(InstanceIds=[instanceid])
+    except:
+        return False
 
 def stop_instance(region, instanceid):
     aws_client(region, resource=False).stop_instances(InstanceIds=[instanceid])
@@ -73,7 +78,7 @@ def create_ami(region, instanceid, instance_name, no_reboot=True):
     
     spotify_image = aws_client(region, resource=False).describe_images(Filters=[{
         'Name': 'name',
-        'Values': ['spotify*',]},
+        'Values': ["spotify {}".format(instance_name)]},
         ])
       
     spotify_image_id = spotify_image["Images"][0]["ImageId"]
@@ -81,8 +86,8 @@ def create_ami(region, instanceid, instance_name, no_reboot=True):
     
     ami_waiter.wait(ImageIds=[spotify_image_id],
                     WaiterConfig={
-                        'Delay': 5,
-                        'MaxAttempts': 50
+                        'Delay': 30,
+                        'MaxAttempts': 100
                         })
     return spotify_image_id
 
@@ -109,7 +114,9 @@ def get_price(region, instance, os):
         aws_service='pricing', 
         region='us-east-1').get_products(
             ServiceCode='AmazonEC2', Filters=json.loads(f))
+    print data['PriceList'][0]
     od = json.loads(data['PriceList'][0])['terms']['OnDemand']
+    # print od
     id1 = list(od)[0]
     id2 = list(od[id1]['priceDimensions'])[0]
     return od[id1]['priceDimensions'][id2]['pricePerUnit']['USD']
@@ -145,11 +152,10 @@ def transfer_eip(region, instanceid, spot_instance):
         try:
             if address["InstanceId"] == instanceid:
                 target_eip = address["AllocationId"]
-                print address
         except KeyError:
+            return
             pass
     try:
-        allocation = aws_client(region, resource=False).allocate_address(Domain='vpc')
         response = aws_client(region, resource=False).associate_address(
             AllocationId=target_eip,
             InstanceId=spot_instance)
@@ -160,13 +166,11 @@ def create_spot_instance(region, instanceid, reserve, vpc, instance_name, keep_u
     LaunchSpecifications = {}
     
     if role:
-        LaunchSpecifications["LaunchSpecifications"] = {"Arn": role["Arn"],
-                                                        "Name": get_role_name(region, role["Arn"])}
+        LaunchSpecifications["IamInstanceProfile"] = {"Arn": role["Arn"],
+                                                      "Name": get_role_name(region, role["Id"])}
     if reserve:
         LaunchSpecifications["SecurityGroupIds"] = [unicode(groups[0])]
         LaunchSpecifications["SubnetId"] = subnet
-
-    print LaunchSpecifications
     
     client = aws_client(region, resource=False)
     
@@ -191,7 +195,8 @@ def create_spot_instance(region, instanceid, reserve, vpc, instance_name, keep_u
     
     instance.wait_until_running()
     instance.load()
-    instance.create_tags(Tags=[{'Key': 'Name', 'Value': 'spot - {}'.format(instance_name)}])
+    instance.create_tags(Tags=[{'Key': 'Name', 'Value': 'spot - {}'.format(instance_name)},
+                               {'Key': 'Source Instance', 'Value': '{} ({})'.format(instanceid, instance_name)}])
     
     if transfer_ip:
         transfer_eip(region, instanceid, instance.instance_id)
@@ -205,6 +210,9 @@ CLICK_CONTEXT_SETTINGS = dict(
     ignore_unknown_options=True)
 
 @click.command(context_settings=CLICK_CONTEXT_SETTINGS)
+@click.option('--region',
+              default=DEFAULT_REGION,
+              help='which region to operate on?')
 @click.option('-r',
               '--reserve',
               is_flag=True,
@@ -218,25 +226,29 @@ CLICK_CONTEXT_SETTINGS = dict(
               is_flag=True,
               help="get an estimate on saving for instance type")
 @click.argument('InstanceId')
-def spotify(instanceid, dry_run, reserve, keep_up):
+def spotify(region, instanceid, dry_run, reserve, keep_up):
     """Convert EC2 on-demand instance to spot instance with one command
     """
     if not keep_up and not dry_run:
-        print "Stopping instance"
-        stop_instance(DEFAULT_REGION, instanceid)
+        if get_instance(region, instanceid):
+            print "Stoping instance..."
+            stop_instance(region, instanceid)
+        else:
+            print "Instance not in region"
+            sys.exit()
     
-    instance = get_instance(DEFAULT_REGION, instanceid)
+    instance = get_instance(region, instanceid)
     my_instance = instance_dict(instance)
 
     if dry_run:
-        instance_cost = get_price(get_region_name(DEFAULT_REGION), my_instance["type"], 'Linux')
-        spot_instance_cost = get_spot_price(DEFAULT_REGION, my_instance["type"])
+        instance_cost = get_price(get_region_name(region), my_instance["type"], 'Linux')
+        spot_instance_cost = get_spot_price(region, my_instance["type"])
         print """Current instance type: {}
 On-demand   price: {}
 Spot        price: {}""".format(my_instance["type"], instance_cost, spot_instance_cost)
         sys.exit()
 
-    spot_instance = create_spot_instance(DEFAULT_REGION,
+    spot_instance = create_spot_instance(region,
                                          instanceid=instanceid, 
                                          reserve=reserve,
                                          vpc=my_instance["vpc"],
