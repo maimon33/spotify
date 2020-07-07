@@ -8,8 +8,9 @@ import time
 import boto3
 import click
 
-from botocore.exceptions import ClientError, NoRegionError
+from prettytable import PrettyTable
 from pkg_resources import resource_filename
+from botocore.exceptions import ClientError, NoRegionError
 
 DEFAULT_REGION="eu-west-1"
 
@@ -44,12 +45,12 @@ def aws_client(region, resource=True, aws_service="ec2"):
         else:
             return boto3.client(aws_service, region_name=region)
     except:
-        print "client failed"
+        print("client failed")
     # except NoRegionError as e:
     #     logger.warning("Error reading 'Region'. Make sure boto is configured")
     #     sys.exit()
     # except ClientError as e:
-    #     print e
+    #     print(e)
 
 def get_role_name(region, role_arn):
     roles = aws_client(region, resource=False, aws_service="iam").list_roles()["Roles"]
@@ -69,12 +70,12 @@ def stop_instance(region, instanceid):
     instance_waiter.wait(InstanceIds=[instanceid])
 
 def create_ami(region, instanceid, instance_name, no_reboot=True):
-    print "Creating AMI from on-demand instance"
+    print("Creating AMI from on-demand instance")
     try:
         ami = aws_client(region, resource=False).create_image(Name="spotify {}".format(instance_name), InstanceId=instanceid, NoReboot=no_reboot)
     except ClientError as e:
         if e.response['Error']['Code'] == 'InvalidAMIName.Duplicate':
-            print "Image Name exist"
+            print("Image Name exist")
     
     spotify_image = aws_client(region, resource=False).describe_images(Filters=[{
         'Name': 'name',
@@ -101,22 +102,41 @@ def get_region_name(region_code):
     except IOError:
         return default_region
 
+def get_instance_os(region, instanceid):
+    instance = aws_client(
+        resource=False,
+        region=region).describe_instances(Filters=[{'Name': 'instance-id', 'Values': [instanceid]}])
+    instance_ami = instance["Reservations"][0]["Instances"][0]["ImageId"]
+    ami_os = aws_client(
+        resource=False,
+        region=region).describe_images(Filters=[{'Name': 'image-id', 'Values': [instance_ami]}])
+    return ami_os["Images"][0]["PlatformDetails"].split("/")[0]
+
+def get_instances(region):
+    all_ids = []
+    instances = aws_client(
+        resource=False,
+        region=region).describe_instances()
+    all_instances = instances["Reservations"]
+    for instance in all_instances:
+        all_ids.append(instance["Instances"][0]["InstanceId"])
+    return all_ids
+
 def get_price(region, instance, os):
     FLT = '[{{"Field": "tenancy", "Value": "shared", "Type": "TERM_MATCH"}},'\
       '{{"Field": "operatingSystem", "Value": "{o}", "Type": "TERM_MATCH"}},'\
       '{{"Field": "preInstalledSw", "Value": "NA", "Type": "TERM_MATCH"}},'\
       '{{"Field": "instanceType", "Value": "{t}", "Type": "TERM_MATCH"}},'\
-      '{{"Field": "location", "Value": "{r}", "Type": "TERM_MATCH"}}]'
+      '{{"Field": "locationType", "Value": "AWS Region", "Type": "TERM_MATCH"}},'\
+      '{{"Field": "capacitystatus", "Value": "Used", "Type": "TERM_MATCH"}}]'
 
-    f = FLT.format(r=region, t=instance, o=os)
+    f = FLT.format(t=instance, o=os)
     data = aws_client(
         resource=False, 
         aws_service='pricing', 
         region='us-east-1').get_products(
             ServiceCode='AmazonEC2', Filters=json.loads(f))
-    print data['PriceList'][0]
     od = json.loads(data['PriceList'][0])['terms']['OnDemand']
-    # print od
     id1 = list(od)[0]
     id2 = list(od[id1]['priceDimensions'])[0]
     return od[id1]['priceDimensions'][id2]['pricePerUnit']['USD']
@@ -138,11 +158,11 @@ def check_spot_status(region, client, SpotId):
         status_code = get_spot_info(region, SpotId)["Status"]["Code"]
         status_msg = get_spot_info(region, SpotId)["Status"]["Message"]
         if status_code == 'capacity-not-available' or status_code == 'pending-fulfillment' or status_code == 'fulfilled':
-            print '{0}...'.format(status_code)
+            print('{0}...'.format(status_code))
             time.sleep(1)
         else:
-            print "{0}\n{1}".format(status_code, status_msg)
-            print "cancel spot request- {0}".format(SpotId)
+            print("{0}\n{1}".format(status_code, status_msg))
+            print("cancel spot request- {0}".format(SpotId))
             client.cancel_spot_instance_requests(SpotInstanceRequestIds=[SpotId])
             sys.exit(0)
 
@@ -160,7 +180,7 @@ def transfer_eip(region, instanceid, spot_instance):
             AllocationId=target_eip,
             InstanceId=spot_instance)
     except ClientError as e:
-        print e
+        print(e)
     
 def create_spot_instance(region, instanceid, reserve, vpc, instance_name, keep_up, type, keypair, groups, transfer_ip, role, subnet):
     LaunchSpecifications = {}
@@ -231,21 +251,46 @@ def spotify(region, instanceid, dry_run, reserve, keep_up):
     """
     if not keep_up and not dry_run:
         if get_instance(region, instanceid):
-            print "Stoping instance..."
+            print("Stoping instance...")
             stop_instance(region, instanceid)
         else:
-            print "Instance not in region"
+            print("Instance not in region")
             sys.exit()
     
-    instance = get_instance(region, instanceid)
-    my_instance = instance_dict(instance)
+    if instanceid != "region":
+        instance = get_instance(region, instanceid)
+        my_instance = instance_dict(instance)
 
     if dry_run:
-        instance_cost = get_price(get_region_name(region), my_instance["type"], 'Linux')
+        if instanceid == "region":
+            all_instances = get_instances(region)
+            x = PrettyTable()
+            x.field_names = ["Instance Name", "On demand cost", "spot cost"]
+            total_on_demand = []
+            total_spot = []
+            for instance in all_instances:
+                an_instance = get_instance(region, instance)
+                my_instance = instance_dict(an_instance)
+                instance_os = get_instance_os(region, instance)
+                instance_cost = get_price(get_region_name(region), my_instance["type"], instance_os)
+                total_on_demand.append(float(instance_cost))
+                spot_instance_cost = get_spot_price(region, my_instance["type"])
+                total_spot.append(float(spot_instance_cost))
+
+                x.add_row([my_instance["name"], instance_cost, spot_instance_cost])
+            total_on_demand_cost = sum(total_on_demand)
+            total_spot_cost = sum(total_spot)
+            x.add_row(["-"*12, "-"*12, "-"*12])
+            x.add_row(["Region cost", total_on_demand_cost, total_spot_cost])
+            print("\n             Hourly cost of EC2      ")
+            print(x)
+            sys.exit()
+        instance_os = get_instance_os(region, instanceid)
+        instance_cost = get_price(get_region_name(region), my_instance["type"], instance_os)
         spot_instance_cost = get_spot_price(region, my_instance["type"])
-        print """Current instance type: {}
+        print("""Current instance type: {}
 On-demand   price: {}
-Spot        price: {}""".format(my_instance["type"], instance_cost, spot_instance_cost)
+Spot        price: {}""".format(my_instance["type"], instance_cost, spot_instance_cost))
         sys.exit()
 
     spot_instance = create_spot_instance(region,
