@@ -282,7 +282,7 @@ def spotify(region, instanceid, dry_run, reserve, keep_up):
             total_spot_cost = sum(total_spot)
             x.add_row(["-"*12, "-"*12, "-"*12])
             x.add_row(["Region cost", total_on_demand_cost, total_spot_cost])
-            print("\n             Hourly cost of EC2      ")
+            print("\n          Hourly cost of EC2 region: {}      ".format(get_region_name(region)))
             print(x)
             sys.exit()
         instance_os = get_instance_os(region, instanceid)
